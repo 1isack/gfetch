@@ -1,6 +1,7 @@
 # gfetch
 
 gfetch is a re-implementation of [Glenda Fetch by arwm](https://github.com/arwn/gfetch) for Linux in the C programming language.
+for from kantiankant lol
 
 # Installation
 
@@ -31,7 +32,7 @@ sudo/doas mk install
 
 - [ ] Multi-monitor fetch 
 - [ ] Multi-partiton fetch 
-- [ ] Wayland compositor/X window manager fetch
+- [x] Wayland compositor/X window manager fetch
 
 # License
 
