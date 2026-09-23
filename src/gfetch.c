@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/utsname.h>
@@ -184,6 +185,44 @@ get_shell(char *buf, size_t sz)
 	}
 }
 
+/* Display server (Wayland vs Xorg) */
+
+static void
+get_display_server(char *buf, size_t sz)
+{
+	const char *session_type = getenv("XDG_SESSION_TYPE");
+	const char *wayland_display = getenv("WAYLAND_DISPLAY");
+	const char *x_display = getenv("DISPLAY");
+
+	if (session_type) {
+		if (strcasecmp(session_type, "wayland") == 0) {
+			snprintf(buf, sz, "Wayland%s%s",
+			         wayland_display ? " (" : "",
+			         wayland_display ? wayland_display : "");
+			if (wayland_display) strncat(buf, ")", sz - strlen(buf) - 1);
+			return;
+		}
+		if (strcasecmp(session_type, "x11") == 0) {
+			snprintf(buf, sz, "Xorg");
+			return;
+		}
+		if (strcasecmp(session_type, "tty") == 0) {
+			snprintf(buf, sz, "tty (no display server)");
+			return;
+		}
+	}
+
+	/* Fallback: env vars alone, session_type unset or unrecognized */
+	if (wayland_display && x_display) {
+		snprintf(buf, sz, "Wayland+XWayland");
+	} else if (wayland_display) {
+		snprintf(buf, sz, "Wayland");
+	} else if (x_display) {
+		snprintf(buf, sz, "Xorg");
+	} else {
+		snprintf(buf, sz, "none (headless/tty)");
+	}
+}
 
 /* Disk */
 
@@ -204,7 +243,7 @@ get_disk(char *buf, size_t sz)
 	snprintf(buf, sz, "%.1f / %.1f GiB", used_gib, total_gib);
 }
 
-/* 
+/*
  * GPU
  */
 
@@ -269,6 +308,79 @@ get_gpu(char *buf, size_t sz)
 		snprintf(buf, sz, "%s", driver);
 }
 
+/* Packages: detect whichever package managers are present and count
+ * installed packages for each, e.g. "pacman 941, flatpak 12, nix 503" */
+
+struct pm_info {
+	const char *label;   /* shown in output */
+	const char *bin;     /* binary to look for on PATH */
+	const char *cmd;     /* shell command whose stdout line count == pkg count */
+};
+
+static const struct pm_info pkg_managers[] = {
+	{ "pacman",  "pacman",      "pacman -Qq 2>/dev/null" },
+	{ "xbps",    "xbps-query",  "xbps-query -l 2>/dev/null" },
+	{ "nix",     "nix-store",   "nix-store -q --requisites /run/current-system 2>/dev/null" },
+	{ "cave",    "cave",        "cave print-ids -m installed --format '%c/%p\\n' 2>/dev/null" },
+	{ "flatpak", "flatpak",     "flatpak list --columns=application 2>/dev/null" },
+	{ "kiss",    "kiss",        "kiss list 2>/dev/null" },
+	{ "apk",     "apk",         "apk info 2>/dev/null" },
+	{ "dpkg",    "dpkg-query",  "dpkg-query -f '.\\n' -W 2>/dev/null" },
+	{ "rpm",     "rpm",         "rpm -qa 2>/dev/null" },
+	{ "portage", "qlist",       "qlist -I 2>/dev/null" },
+	{ NULL, NULL, NULL }
+};
+
+static int
+bin_on_path(const char *bin)
+{
+	char cmd[256];
+	snprintf(cmd, sizeof(cmd), "command -v %s >/dev/null 2>&1", bin);
+	return system(cmd) == 0;
+}
+
+static long
+count_lines(const char *cmd)
+{
+	FILE *f = popen(cmd, "r");
+	if (!f) return -1;
+	long n = 0;
+	char line[512];
+	while (fgets(line, sizeof(line), f)) n++;
+	int status = pclose(f);
+	if (status != 0 && n == 0) return -1;
+	return n;
+}
+
+static void
+get_packages(char *buf, size_t sz)
+{
+	buf[0] = '\0';
+	int first = 1;
+
+	for (int i = 0; pkg_managers[i].bin != NULL; i++) {
+		if (!bin_on_path(pkg_managers[i].bin))
+			continue;
+
+		long n = count_lines(pkg_managers[i].cmd);
+		if (n < 0)
+			continue;
+
+		char entry[64];
+		snprintf(entry, sizeof(entry), "%s%s %ld",
+		         first ? "" : ", ", pkg_managers[i].label, n);
+
+		if (strlen(buf) + strlen(entry) + 1 >= sz)
+			break;
+
+		strncat(buf, entry, sz - strlen(buf) - 1);
+		first = 0;
+	}
+
+	if (buf[0] == '\0')
+		snprintf(buf, sz, "unknown");
+}
+
 /* Glenda the rabbit */
 
 static const char *rabbit[] = {
@@ -277,11 +389,13 @@ static const char *rabbit[] = {
 	"   j\". ..    os: %s",
 	"   (  . .)   kernel: %s",
 	"   |   \xc2\xb0 \xc2\xa1   shell: %s",
-	"   \xc2\xbf     ;   uptime: %s",
-	"   c?\".UJ    cpu: %s",
+	"   \xc2\xbf     ;   display: %s",
+	"   c?\".UJ    uptime: %s",
+	"             cpu: %s",
 	"             ram: %s / %s GiB",
 	"             disk: %s",
 	"             gpu: %s",
+	"             pkgs: %s",
 	NULL
 };
 
@@ -291,9 +405,9 @@ int
 main(void)
 {
 	char os[128], kernel[128], cpu[256];
-	char shell[64], uptime[64];
+	char shell[64], uptime[64], display[128];
 	char ram_used[32], ram_total[32];
-	char disk[64], gpu[128];
+	char disk[64], gpu[128], packages[512];
 	char hostname[64] = {0};
 	const char *user;
 
@@ -301,10 +415,12 @@ main(void)
 	get_kernel(kernel, sizeof(kernel));
 	get_cpu(cpu, sizeof(cpu));
 	get_shell(shell, sizeof(shell));
+	get_display_server(display, sizeof(display));
 	get_uptime(uptime, sizeof(uptime));
 	get_ram(ram_used, sizeof(ram_used), ram_total, sizeof(ram_total));
 	get_disk(disk, sizeof(disk));
 	get_gpu(gpu, sizeof(gpu));
+	get_packages(packages, sizeof(packages));
 
 	gethostname(hostname, sizeof(hostname) - 1);
 	user = getenv("USER");
@@ -316,11 +432,13 @@ main(void)
 	printf(rabbit[2], os); putchar('\n');
 	printf(rabbit[3], kernel); putchar('\n');
 	printf(rabbit[4], shell); putchar('\n');
-	printf(rabbit[5], uptime); putchar('\n');
-	printf(rabbit[6], cpu); putchar('\n');
-	printf(rabbit[7], ram_used, ram_total); putchar('\n');
-	printf(rabbit[8], disk); putchar('\n');
-	printf(rabbit[9], gpu); putchar('\n');
+	printf(rabbit[5], display); putchar('\n');
+	printf(rabbit[6], uptime); putchar('\n');
+	printf(rabbit[7], cpu); putchar('\n');
+	printf(rabbit[8], ram_used, ram_total); putchar('\n');
+	printf(rabbit[9], disk); putchar('\n');
+	printf(rabbit[10], gpu); putchar('\n');
+	printf(rabbit[11], packages); putchar('\n');
 
 	return 0;
 }
