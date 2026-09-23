@@ -1,7 +1,10 @@
 # gfetch
 
 gfetch is a re-implementation of [Glenda Fetch by arwm](https://github.com/arwn/gfetch) for Linux in the C programming language.
-for from kantiankant lol
+
+# idk.txt
+
+forked from kantiankant lol
 
 # Installation
 
